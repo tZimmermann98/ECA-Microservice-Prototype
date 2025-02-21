@@ -25,12 +25,12 @@ RUN python3.10 -m pip install huggingface_hub
 
 RUN huggingface-cli download fudan-generative-ai/hallo2 --local-dir ./pretrained_models
 
-COPY inference_api/additional_requirements.txt /app/additional_requirements.txt
+COPY additional_requirements.txt /app/additional_requirements.txt
 
 RUN python3.10 -m pip install -r additional_requirements.txt
 
-COPY inference_api/defaut.yaml app/default.yaml
-COPY inference_api/main.py app/main.py
+COPY defaut.yaml app/default.yaml
+COPY main.py app/main.py
 
 EXPOSE 8000
 
