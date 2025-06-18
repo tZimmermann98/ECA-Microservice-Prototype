@@ -1,0 +1,5 @@
+streamlit
+requests
+boto3
+sqlalchemy
+psycopg2-binary

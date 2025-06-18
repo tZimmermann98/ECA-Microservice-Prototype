@@ -1,0 +1,367 @@
+services:
+  postgres:
+    image: postgres:latest
+    restart: unless-stopped
+    container_name: postgres
+    expose:
+      - 5432
+    environment:
+      - TZ=Europe/Berlin
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - PGUSER=${DB_USER}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    
+  db-init:
+    build:
+      context: ./db-init
+    restart: on-failure 
+    environment:
+      - TZ=Europe/Berlin  
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+    volumes:
+      - ./utils:/app/utils
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    expose:
+      - 9000
+      - 9001
+    environment:
+      - TZ=Europe/Berlin
+      - MINIO_ROOT_USER=${S3_ACCESS_KEY_ID}
+      - MINIO_ROOT_PASSWORD=${S3_SECRET_ACCESS_KEY}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  create-buckets:
+    image: quay.io/minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 ${S3_ACCESS_KEY_ID} ${S3_SECRET_ACCESS_KEY};
+      /usr/bin/mc mb myminio/inputs --ignore-existing;
+      /usr/bin/mc mb myminio/audio-outputs --ignore-existing;
+      /usr/bin/mc mb myminio/video-outputs --ignore-existing;
+      exit 0;
+      "
+
+  oauth2:
+    image: quay.io/oauth2-proxy/oauth2-proxy:latest
+    container_name: oauth2
+    expose:
+      - 4180
+    command:
+      - --http-address=0.0.0.0:4180
+      - --https-address=0.0.0.0:4443
+      - --auth-logging=true
+      - --oidc-email-claim=email # depending on your OIDC provider, you may need to change this
+      - --oidc-issuer-url=https://ai-avatar-chat.eu.auth0.com/ # You must change these URL to match your OIDC provider (e.g., Auth0, Google, etc.)
+      - --pass-access-token=true
+      - --pass-authorization-header=true
+      - --pass-host-header=true
+      - --pass-user-headers=true
+      - --provider=oidc
+      - --redirect-url=https://ai-face-to-face.local/oauth2/callback # You must change these URL to match your own domain
+      - --request-logging=true
+      - --reverse-proxy=true
+      - "--scope=openid profile email" # depending on your OIDC provider, you may need to change this
+      - --set-authorization-header=true
+      - --set-xauthrequest=true
+      - --skip-oidc-discovery=false
+      - --skip-provider-button=false
+      - --standard-logging=true
+    environment:
+      - TZ=Europe/Berlin
+      - OAUTH2_PROXY_COOKIE_SECURE=true
+      - OAUTH2_PROXY_UPSTREAMS=http://frontend:8501/
+      - OAUTH2_PROXY_EMAIL_DOMAINS=*
+      - OAUTH2_PROXY_COOKIE_SECRET=${OAUTH_COOKIE_SECRET}
+      - OAUTH2_PROXY_CLIENT_ID=${OAUTH_CLIENT_ID}
+      - OAUTH2_PROXY_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
+      - OAUTH2_PROXY_SET_XAUTHREQUEST=true
+      - OAUTH2_PROXY_COOKIE_REFRESH=23h59m00s
+    depends_on:
+      frontend:
+        condition: service_healthy
+    restart: always
+
+  nginx:
+    image: nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/certs/nginx-selfsigned.crt:/etc/nginx/ssl/certificate.crt
+      - ./nginx/certs/nginx-selfsigned.key:/etc/nginx/ssl/private_key.key
+      - /tmp/empty:/docker-entrypoint.d/
+    ports:
+      - 443:443
+      - 80:80
+    command: nginx-debug -g 'daemon off;'
+    environment:
+      - TZ=Europe/Berlin
+    depends_on:
+      - oauth2
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: frontend
+    restart: unless-stopped
+    expose:
+      - 8501
+    environment:
+      - TZ=Europe/Berlin
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+      - ORCHESTRATION_SERVICE_URL=http://orchestration-service:8000
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
+      - S3_INPUT_BUCKET_NAME=inputs
+      - S3_VIDEO_OUTPUT_BUCKET_NAME=video-outputs
+    volumes:
+      - ./utils:/app/utils
+    depends_on:
+      orchestration-service:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      create-buckets:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  orchestration-service:
+    build:
+      context: ./orchestration-service
+    container_name: orchestration-service
+    restart: unless-stopped
+    expose:
+      - 8000
+    volumes:
+      - ./utils:/app/utils
+    environment:
+      - TZ=Europe/Berlin
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+      - PERCEPTION_SERVICE_URL=http://perception-service:8000
+      - CONVERSATIONAL_SERVICE_URL=http://conversational-service:8000
+      - VOCAL_SERVICE_URL=http://vocal-service:8000
+      - EMBODIMENT_SERVICE_URL=http://embodiment-service:8000
+      - LLM_HOST=https://api.openai.com/v1
+      - LLM_API_KEY=${OPENAI_API_KEY}
+      - LLM_MODEL=gpt-4o
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
+      - S3_BUCKET_NAME=inputs
+    depends_on:
+      perception-service:
+        condition: service_healthy
+      conversational-service:
+        condition: service_healthy
+      vocal-service:
+        condition: service_healthy
+      embodiment-service:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      create-buckets:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  perception-service:
+    build:
+      context: ./perception-service
+    container_name: perception-service
+    restart: unless-stopped
+    expose:
+      - 8000
+    volumes:
+      - ./utils:/app/utils
+      - deepface_cache:/root/.deepface
+      - hf_cache:/root/.cache/huggingface
+      - whisper_cache:/root/.cache/whisper
+    environment:
+      - TZ=Europe/Berlin
+      - WHISPER_MODEL=turbo
+      - AUDIO_EMOTION_MODEL=speechbrain/emotion-recognition-wav2vec2-IEMOCAP
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
+      - S3_BUCKET_NAME=audio-outputs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      create-buckets:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 10 # increased retries for perception service due to model loading time at frist startup
+
+  conversational-service:
+    build:
+      context: ./conversational-service
+    container_name: conversational-service
+    restart: unless-stopped
+    expose:
+      - 8000
+    environment:
+      - TZ=Europe/Berlin
+      - OPENAI_API_KEY=${OPENAI_API_KEY} 
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+    volumes:
+      - ./utils:/app/utils
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  vocal-service:
+    build:
+      context: ./vocal-service
+    container_name: vocal-service
+    restart: unless-stopped
+    expose:
+      - 8000
+    volumes:
+      - ./utils:/app/utils
+    environment:
+      - TZ=Europe/Berlin
+      - FISHAUDIO_API_KEY=${FISHAUDIO_API_KEY}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
+      - S3_BUCKET_NAME=audio-outputs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      create-buckets:
+        condition: service_completed_successfully
+      
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  embodiment-service: 
+    build:
+      context: ./embodiment-service
+    container_name: embodiment-service
+    restart: unless-stopped
+    expose:
+      - 8000
+    volumes:
+      - ./utils:/app/utils
+    environment:
+      - TZ=Europe/Berlin
+      - HEYGEN_API_KEY=${HEYGEN_API_KEY}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
+      - S3_AUDIO_BUCKET_NAME=audio-outputs
+      - S3_VIDEO_BUCKET_NAME=video-outputs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      create-buckets:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+
+volumes:
+  postgres:
+  minio_data:
+  deepface_cache:
+  hf_cache:
+  whisper_cache:

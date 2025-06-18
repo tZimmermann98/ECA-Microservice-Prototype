@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+python-multipart
+deepface
+opencv-python-headless
+numpy
+speechbrain
+torch
+torchaudio
+transformers
+sentencepiece
+tf-keras
+openai-whisper
+moviepy
+boto3
+sqlalchemy
+psycopg2-binary
