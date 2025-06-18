@@ -74,8 +74,9 @@ Based on this exchange, should any new facts be stored?
 Provide your answer ONLY by calling the 'save_memories' tool with a valid list of memory objects.
 """
 
-async def run_orchestration_pipeline(interaction_id: int, db: Session):
+async def run_orchestration_pipeline(interaction_id: int):
     """The main orchestration logic that runs in the background."""
+    db = get_db() 
     try:
         # Step 1: Fetch the newly created interaction
         interaction = db.query(Interaction).options(joinedload(Interaction.session)).filter(Interaction.interaction_id == interaction_id).one()
@@ -218,7 +219,7 @@ async def orchestrate_interaction(request: OrchestrationRequest, background_task
         db.commit()
         db.refresh(new_interaction)
         
-        background_tasks.add_task(run_orchestration_pipeline, new_interaction.interaction_id, db)
+        background_tasks.add_task(run_orchestration_pipeline, new_interaction.interaction_id)
 
         return OrchestrationResponse(interaction_id=new_interaction.interaction_id)
 
