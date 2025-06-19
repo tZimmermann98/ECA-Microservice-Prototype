@@ -44,9 +44,8 @@ class OrchestrationResponse(BaseModel):
 def get_s3_client():
     return boto3.client('s3', endpoint_url=S3_ENDPOINT_URL, aws_access_key_id=S3_ACCESS_KEY_ID, aws_secret_access_key=S3_SECRET_ACCESS_KEY)
 
-async def run_orchestration_pipeline(interaction_id: int):
+async def run_orchestration_pipeline(interaction_id: int, db: Session):
     """The main orchestration logic that runs in the background."""
-    db = get_db() 
     try:
         # Step 1: Fetch the newly created interaction
         interaction = db.query(Interaction).options(joinedload(Interaction.session)).filter(Interaction.interaction_id == interaction_id).one()
@@ -158,7 +157,7 @@ async def orchestrate_interaction(request: OrchestrationRequest, background_task
         db.commit()
         db.refresh(new_interaction)
         
-        background_tasks.add_task(run_orchestration_pipeline, new_interaction.interaction_id)
+        background_tasks.add_task(run_orchestration_pipeline, new_interaction.interaction_id, db)
 
         return OrchestrationResponse(interaction_id=new_interaction.interaction_id)
 
