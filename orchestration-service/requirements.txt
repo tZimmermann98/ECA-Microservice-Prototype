@@ -4,5 +4,4 @@ python-multipart
 sqlalchemy
 psycopg2-binary
 httpx
-openai
 boto3

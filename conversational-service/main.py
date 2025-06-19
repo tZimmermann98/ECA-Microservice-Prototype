@@ -5,8 +5,13 @@ from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field
 from openai import OpenAI
 from sqlalchemy.orm import Session, joinedload
+from typing import List, Literal
 
-from utils.db import get_db, Avatar, User, Session as DbSession, Interaction
+from utils.db import get_db, Avatar, User, Session as DbSession, Interaction, UserMemory, AvatarMemory
+
+LLM_HOST = os.getenv("LLM_HOST", "https://api.openai.com/v1")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
 app = FastAPI(
     title="Conversational Engine",
@@ -26,6 +31,14 @@ class ConversationalResponse(BaseModel):
     raw_content_response: str
     final_response_text: str
 
+class MemoryItem(BaseModel):
+    memory_kind: Literal["user", "avatar"]
+    memory_key: str
+    memory_value: str
+
+class MemoryExtractionTool(BaseModel):
+    memories: List[MemoryItem]
+
 # --- Helper Function for API Client ---
 def get_openai_client(provider_endpoint: str, api_key_env_var: str | None) -> OpenAI:
     api_key = "not-needed"
@@ -35,6 +48,22 @@ def get_openai_client(provider_endpoint: str, api_key_env_var: str | None) -> Op
             logger.error(f"Environment variable '{api_key_env_var}' not set!")
             raise HTTPException(status_code=500, detail="API key configuration error.")
     return OpenAI(base_url=provider_endpoint, api_key=api_key)
+
+def construct_memory_extraction_prompt(user_input: str, avatar_response: str) -> str:
+    """Creates the detailed prompt for the memory extraction LLM."""
+    return f"""You are a memory extraction agent. Your task is to analyze a conversation turn and determine if any new, lasting information about the USER or the AVATAR should be saved.
+
+Analyze the following conversation:
+User Input: "{user_input}"
+Avatar Response: "{avatar_response}"
+
+Based on this exchange, should any new facts be stored?
+- If the user reveals personal information (e.g., "My name is Tobias", "I'm interested in DSR"), extract it for USER memory.
+- If the avatar makes a statement about itself or its capabilities (e.g., "You can call me Jan"), extract it for AVATAR memory.
+- If no new, lasting information is revealed, call the tool with an empty list.
+
+Provide your answer ONLY by calling the 'save_memories' tool with a valid list of memory objects.
+"""
 
 # --- API Endpoint ---
 @app.post("/v1/generate-response", response_model=ConversationalResponse)
@@ -160,6 +189,35 @@ async def generate_response(request: ConversationalRequest, db: Session = Depend
         db.rollback()
         logger.error(f"Failed to save text to database for interaction {request.interaction_id}: {e}")
         raise HTTPException(status_code=500, detail="Database update failed after text generation.")
+    
+    # 4. Stage 3: Update Memory
+    logger.info(f"Starting Memory Extraction for interaction {request.interaction_id}...")
+    try:
+        memory_client = OpenAI(base_url=LLM_HOST, api_key=LLM_API_KEY)
+        prompt = construct_memory_extraction_prompt(interaction.user_input_text, final_response_text)
+        
+        response = memory_client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "system", "content": "You are a memory extraction agent."}, {"role": "user", "content": prompt}],
+            tools=[{"type": "function", "function": {"name": "save_memories", "parameters": MemoryExtractionTool.model_json_schema()}}],
+            tool_choice={"type": "function", "function": {"name": "save_memories"}}
+        )
+        
+        tool_call = response.choices[0].message.tool_calls[0] if response.choices[0].message.tool_calls else None
+        if tool_call:
+            extracted_data = MemoryExtractionTool.model_validate_json(tool_call.function.arguments)
+            for item in extracted_data.memories:
+                if item.memory_kind == "user":
+                    db.add(UserMemory(user_id=user.user_id, memory_key=item.memory_key, memory_value=item.memory_value))
+                elif item.memory_kind == "avatar":
+                    db.add(AvatarMemory(avatar_id=avatar.avatar_id, memory_key=item.memory_key, memory_value=item.memory_value))
+            db.commit()
+            logger.info(f"Saved {len(extracted_data.memories)} new memories.")
+        else:
+            logger.info("No new memories to save.")
+    except Exception as e:
+        logger.error(f"Memory extraction failed: {e}")
+        db.rollback() # Rollback memory additions on failure
 
     return ConversationalResponse(
         raw_content_response=raw_content_response,

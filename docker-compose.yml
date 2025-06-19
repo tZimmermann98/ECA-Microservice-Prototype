@@ -189,9 +189,6 @@ services:
       - CONVERSATIONAL_SERVICE_URL=http://conversational-service:8000
       - VOCAL_SERVICE_URL=http://vocal-service:8000
       - EMBODIMENT_SERVICE_URL=http://embodiment-service:8000
-      - LLM_HOST=https://api.openai.com/v1
-      - LLM_API_KEY=${OPENAI_API_KEY}
-      - LLM_MODEL=gpt-4o
       - S3_ENDPOINT_URL=http://minio:9000
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
@@ -274,6 +271,9 @@ services:
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_NAME=${DB_NAME}
+      - LLM_HOST=https://api.openai.com/v1
+      - LLM_API_KEY=${OPENAI_API_KEY}
+      - LLM_MODEL=gpt-4o
     volumes:
       - ./utils:/app/utils
     depends_on:

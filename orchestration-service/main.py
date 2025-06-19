@@ -6,20 +6,14 @@ import boto3
 import asyncio
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
-from typing import List, Literal
 from sqlalchemy.orm import Session, joinedload
-from openai import OpenAI
 
-from utils.db import get_db, Interaction, UserMemory, AvatarMemory
+from utils.db import get_db, Interaction
 
 PERCEPTION_SERVICE_URL = os.getenv("PERCEPTION_SERVICE_URL", "http://perception-service:8000")
 CONVERSATIONAL_SERVICE_URL = os.getenv("CONVERSATIONAL_SERVICE_URL", "http://conversational-service:8000")
 VOCAL_SERVICE_URL = os.getenv("VOCAL_SERVICE_URL", "http://vocal-service:8000")
 EMBODIMENT_SERVICE_URL = os.getenv("EMBODIMENT_SERVICE_URL", "http://embodiment-service:8004")
-
-LLM_HOST = os.getenv("LLM_HOST", "https://api.openai.com/v1")
-LLM_API_KEY = os.getenv("LLM_API_KEY")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL")
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID")
@@ -47,32 +41,8 @@ class OrchestrationResponse(BaseModel):
     interaction_id: int
     message: str = "Orchestration process started."
 
-class MemoryItem(BaseModel):
-    memory_kind: Literal["user", "avatar"]
-    memory_key: str
-    memory_value: str
-
-class MemoryExtractionTool(BaseModel):
-    memories: List[MemoryItem]
-
 def get_s3_client():
     return boto3.client('s3', endpoint_url=S3_ENDPOINT_URL, aws_access_key_id=S3_ACCESS_KEY_ID, aws_secret_access_key=S3_SECRET_ACCESS_KEY)
-
-def construct_memory_extraction_prompt(user_input: str, avatar_response: str) -> str:
-    """Creates the detailed prompt for the memory extraction LLM."""
-    return f"""You are a memory extraction agent. Your task is to analyze a conversation turn and determine if any new, lasting information about the USER or the AVATAR should be saved.
-
-Analyze the following conversation:
-User Input: "{user_input}"
-Avatar Response: "{avatar_response}"
-
-Based on this exchange, should any new facts be stored?
-- If the user reveals personal information (e.g., "My name is Tobias", "I'm interested in DSR"), extract it for USER memory.
-- If the avatar makes a statement about itself or its capabilities (e.g., "You can call me Jan"), extract it for AVATAR memory.
-- If no new, lasting information is revealed, call the tool with an empty list.
-
-Provide your answer ONLY by calling the 'save_memories' tool with a valid list of memory objects.
-"""
 
 async def run_orchestration_pipeline(interaction_id: int):
     """The main orchestration logic that runs in the background."""
@@ -115,50 +85,19 @@ async def run_orchestration_pipeline(interaction_id: int):
         db.commit()
         logger.info(f"[Interaction {interaction_id}] Conversation complete. Response: '{interaction.agent_response_text}'")
 
-        # Step 4: Memory Extraction
-        logger.info(f"[Interaction {interaction_id}] Starting Memory Extraction...")
-        try:
-            memory_client = OpenAI(base_url=LLM_HOST, api_key=LLM_API_KEY)
-            prompt = construct_memory_extraction_prompt(interaction.user_input_text, interaction.agent_response_text)
-            
-            messages = [{"role": "system", "content": "You are a memory extraction agent."}, {"role": "user", "content": prompt}]
-            
-            response = memory_client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=messages,
-                tools=[{"type": "function", "function": {"name": "save_memories", "description": "Saves a list of new memories.", "parameters": MemoryExtractionTool.model_json_schema()}}],
-                tool_choice={"type": "function", "function": {"name": "save_memories"}}
-            )
-            
-            tool_call = response.choices[0].message.tool_calls[0] if response.choices[0].message.tool_calls else None
-            if tool_call and tool_call.function.name == "save_memories":
-                extracted_data = MemoryExtractionTool.model_validate_json(tool_call.function.arguments)
-                for item in extracted_data.memories:
-                    if item.memory_kind == "user":
-                        db.add(UserMemory(user_id=user_id, memory_key=item.memory_key, memory_value=item.memory_value))
-                    elif item.memory_kind == "avatar":
-                        db.add(AvatarMemory(avatar_id=avatar_id, memory_key=item.memory_key, memory_value=item.memory_value))
-                db.commit()
-                logger.info(f"Saved {len(extracted_data.memories)} new memories.")
-            else:
-                logger.info("No new memories to save.")
-        except Exception as e:
-            logger.error(f"Memory extraction failed: {e}")
-            db.rollback()
-
-        # Step 5: Vocal
+        # Step 4: Vocal
         logger.info(f"[Interaction {interaction_id}] Calling Vocal Service...")
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(f"{VOCAL_SERVICE_URL}/v1/synthesize", json={"interaction_id": interaction.interaction_id})
             response.raise_for_status()
         
-        # Step 6: Embodiment
+        # Step 5: Embodiment
         logger.info(f"[Interaction {interaction_id}] Calling Embodiment Service...")
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(f"{EMBODIMENT_SERVICE_URL}/v1/generate", json={"interaction_id": interaction.interaction_id})
             response.raise_for_status()
 
-        # Step 7: Poll for Video Completion
+        # Step 6: Poll for Video Completion
         logger.info(f"[Interaction {interaction_id}] Started polling for video completion...")
         max_attempts = POLLING_TIMEOUT // POLLING_INTERVAL
         for attempt in range(max_attempts):
