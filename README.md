@@ -67,8 +67,10 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
 -keyout ./nginx/certs/nginx-selfsigned.key \
 -out ./nginx/certs/nginx-selfsigned.crt \
 -subj "/C=DE/ST=NRW/L=Muenster/O=Local Dev/CN=ai-face-to-face.local"
-🔐 Your browser will show a security warning because the certificate is self-signed. You can safely accept the warning to proceed to the site.
 ```
+
+🔐 Your browser will show a security warning because the certificate is self-signed. You can safely accept the warning to proceed to the site.
+
 ---
 
 ### 4. Create and Configure the `.env` File
