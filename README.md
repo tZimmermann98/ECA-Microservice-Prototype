@@ -56,7 +56,22 @@ Add this line at the end:
 
 ---
 
-### 3. Create and Configure the `.env` File
+### 3. Create SSL Certificate for Local Development
+
+The NGINX reverse proxy requires an SSL certificate to serve the application over HTTPS locally.
+
+Run the following OpenSSL command from the project root. This will create the nginx-selfsigned.key and nginx-selfsigned.crt files in the nginx/certs/ directory.
+
+```Bash
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+-keyout ./nginx/certs/nginx-selfsigned.key \
+-out ./nginx/certs/nginx-selfsigned.crt \
+-subj "/C=DE/ST=NRW/L=Muenster/O=Local Dev/CN=ai-face-to-face.local"
+🔐 Your browser will show a security warning because the certificate is self-signed. You can safely accept the warning to proceed to the site.
+```
+---
+
+### 4. Create and Configure the `.env` File
 
 1. In the project root, create a file named `.env`.
 2. Copy the content from `example.env` and replace all placeholders with your actual credentials.
@@ -79,7 +94,7 @@ OAUTH_CLIENT_SECRET=your_oauth_client_secret
 
 ---
 
-### 4. Update Admin User Email and Avatar/Voice IDs
+### 5. Update Admin User Email and Avatar/Voice IDs
 
 Before starting the application:
 
